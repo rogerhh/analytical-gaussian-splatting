@@ -18,7 +18,7 @@ import argparse
 def main(num_iter, use_adam, diagonal_update_interval=10, use_D_exact=False, dropout_ratio=0.0, dropout_JTJv=True):
     torch.manual_seed(0)
 
-    K = 3   # Number of Gaussians
+    K = 2   # Number of Gaussians
 
     random_bg = True
 
@@ -45,12 +45,13 @@ def main(num_iter, use_adam, diagonal_update_interval=10, use_D_exact=False, dro
     # import code; code.interact(local=locals())
 
     # alpha_param = torch.nn.Parameter(torch.rand(K, 3))
-    # params = torch.nn.Parameter(torch.rand(K, 5))
-    params = torch.rand(K, 5, requires_grad=True)
+    params = params_gt.tile((K, 1))
+    params[:, 1] = torch.rand(K)  # initialize alpha to a different value than gt
+    params.requires_grad = True
 
     optimizer = torch.optim.Adam([{"params": params, "lr": 0.02}])
     adam_optimizer = AdamOptimizer(lr=0.02)
-    sophia_optimizer = SophiaOptimizer(diagonal_update_interval=1, num_update_iter=1, betas=(0.9, 0.999))
+    sophia_optimizer = SophiaOptimizer(diagonal_update_interval=diagonal_update_interval, num_update_iter=1, betas=(0.9, 0.99))
 
     all_losses = []
     all_alphas = [[] for _ in range(K)]
@@ -81,6 +82,10 @@ def main(num_iter, use_adam, diagonal_update_interval=10, use_D_exact=False, dro
             else:
                 s = s_sophia
             # import code; code.interact(local=locals(), banner="After getting updates")
+
+            s_copy = s.clone()
+            s *= 0.0
+            s[:, 1] = s_copy[:, 1]  # only update alpha
             params += s
             # s_sophia = sophia_optimizer.get_update(g, JTJv_func, z_gen_func)
             # params += s_sophia
@@ -105,10 +110,6 @@ def main(num_iter, use_adam, diagonal_update_interval=10, use_D_exact=False, dro
         all_losses.append(loss.item())
         for k in range(K):
             all_alphas[k].append(alpha[k].item())
-
-
-    # all_losses = np.array(all_losses)
-    # all_alphas = np.array(all_alphas)
      
     figure, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 10))
     ax1.plot(all_losses, label='Loss')
@@ -123,7 +124,7 @@ def main(num_iter, use_adam, diagonal_update_interval=10, use_D_exact=False, dro
     ax2.axhline(y=alpha_gt.item(), color='r', linestyle='--', label='Ground Truth')
     ax2.legend()
 
-    figname = f'figures/1d_gaussian_fitting_adam' if use_adam else f'figures/1d_gaussian_fitting_sophia'
+    figname = f'figures/2gaussian_alpha_fitting_adam' if use_adam else f'figures/2gaussian_alpha_fitting_sophia'
     if not use_adam:
         figname += '_with_D_exact' if use_D_exact else '_with_D_est'
     if dropout_ratio > 0.0:
@@ -131,7 +132,6 @@ def main(num_iter, use_adam, diagonal_update_interval=10, use_D_exact=False, dro
     if not dropout_JTJv:
         figname += '_no_dropout_JTJv'
     plt.savefig(figname + '.png')
-    print(f"Saved figure to {figname}.png")
 
     J = compute_J(test_points, params_gt, params, bg)
     JTJ = J.T @ J
@@ -139,6 +139,34 @@ def main(num_iter, use_adam, diagonal_update_interval=10, use_D_exact=False, dro
     D_est_1k = hutchinson(lambda v: JTJv_func(v, test_points, params_gt, params, bg), 
                           lambda: z_gen_func(params),
                           num_iters=1000)
+
+    
+    with torch.no_grad():
+        alpha1 = torch.linspace(0.001, 1.0, 500)
+        alpha2 = torch.linspace(0.001, 1.0, 500)
+        alpha1, alpha2 = torch.meshgrid(alpha1, alpha2, indexing='ij')
+        alpha_grid = torch.stack([alpha1, alpha2], dim=-1)
+
+        render_gt_no_bg = render_gaussians(test_points, std_gt, alpha_gt, color_gt, bg, with_bg=False)
+        std, alpha, color = tensor_to_params(params)
+        render_grid_no_bg = render_gaussians_alpha_grid(test_points, std, alpha_grid, color, bg, with_bg=False)
+
+        pix_grid = ((render_gt_no_bg[None,None,:,:] - render_grid_no_bg).abs().mean(dim=(-1,-2)))
+        reg_grid = 1e-1 * alpha_grid.abs().mean(dim=-1)
+
+        loss_grid = pix_grid + reg_grid
+
+        plt.figure(figsize=(8, 6))
+        plt.contourf(alpha1.detach().numpy(), alpha2.detach().numpy(), loss_grid.detach().numpy(), levels=50, cmap='viridis')
+        plt.plot(all_alphas[0], all_alphas[1], color='r', label='Optimization Path')
+        plt.colorbar(label='Loss')
+        plt.savefig(figname + '_alpha_grid_heatmap.png')
+        print(f"Saved alpha grid heatmap to {figname + '_alpha_grid_heatmap.png'}")
+
+        import code; code.interact(local=locals(), banner="After optimization, before plotting alpha grid heatmap")
+        
+
+
 
     # import code with both globals and locals
     import code; code.interact(local=dict(globals(), **locals()), banner="End of main, interactive session")
